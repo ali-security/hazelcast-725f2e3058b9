@@ -24,8 +24,11 @@ import com.hazelcast.cp.internal.RaftService;
 import com.hazelcast.cp.internal.datastructures.spi.operation.DestroyRaftObjectOp;
 import com.hazelcast.instance.Node;
 import com.hazelcast.nio.Connection;
+import com.hazelcast.security.permission.ActionConstants;
 
 import java.security.Permission;
+
+import static com.hazelcast.security.permission.ActionConstants.getPermission;
 
 
 /**
@@ -68,7 +71,7 @@ public class DestroyRaftObjectMessageTask extends AbstractMessageTask<CPGroupDes
 
     @Override
     public Permission getRequiredPermission() {
-        return null;
+        return getPermission(parameters.objectName, parameters.serviceName, ActionConstants.ACTION_DESTROY);
     }
 
     @Override

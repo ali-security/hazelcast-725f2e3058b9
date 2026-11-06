@@ -39,8 +39,15 @@ public abstract class AbstractMultiTargetMessageTask<P> extends AbstractMessageT
         super(clientMessage, node, connection);
     }
 
+    /**
+     * Called on node side, before starting any operation.
+     */
+    protected void beforeProcess() {
+    }
+
     @Override
     protected void processMessage() throws Throwable {
+        beforeProcess();
         Supplier<Operation> operationSupplier = createOperationSupplier();
         Collection<Member> targets = getTargets();
 

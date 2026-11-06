@@ -23,6 +23,8 @@ import com.hazelcast.instance.Node;
 import com.hazelcast.map.impl.MapService;
 import com.hazelcast.map.impl.querycache.subscriber.operation.SetReadCursorOperation;
 import com.hazelcast.nio.Connection;
+import com.hazelcast.security.permission.ActionConstants;
+import com.hazelcast.security.permission.MapPermission;
 import com.hazelcast.spi.Operation;
 
 import java.security.Permission;
@@ -55,7 +57,7 @@ public class MapSetReadCursorMessageTask
 
     @Override
     public Permission getRequiredPermission() {
-        return null;
+        return new MapPermission(parameters.mapName, ActionConstants.ACTION_READ);
     }
 
     @Override
