@@ -26,12 +26,14 @@ import com.hazelcast.concurrent.countdownlatch.CountDownLatchService;
 import com.hazelcast.concurrent.idgen.IdGeneratorService;
 import com.hazelcast.concurrent.lock.LockService;
 import com.hazelcast.concurrent.semaphore.SemaphoreService;
+import com.hazelcast.durableexecutor.impl.DistributedDurableExecutorService;
 import com.hazelcast.executor.impl.DistributedExecutorService;
 import com.hazelcast.flakeidgen.impl.FlakeIdGeneratorService;
 import com.hazelcast.map.impl.MapService;
 import com.hazelcast.mapreduce.impl.MapReduceService;
 import com.hazelcast.multimap.impl.MultiMapService;
 import com.hazelcast.replicatedmap.impl.ReplicatedMapService;
+import com.hazelcast.scheduledexecutor.impl.DistributedScheduledExecutorService;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import com.hazelcast.test.annotation.QuickTest;
 import com.hazelcast.topic.impl.TopicService;
@@ -131,6 +133,22 @@ public class ActionConstantsTest {
 
         assertNotNull(permission);
         assertTrue(permission instanceof ExecutorServicePermission);
+    }
+
+    @Test
+    public void getPermission_DurableExecutor() {
+        Permission permission = ActionConstants.getPermission("foo", DistributedDurableExecutorService.SERVICE_NAME);
+
+        assertNotNull(permission);
+        assertTrue(permission instanceof DurableExecutorServicePermission);
+    }
+
+    @Test
+    public void getPermission_ScheduledExecutor() {
+        Permission permission = ActionConstants.getPermission("foo", DistributedScheduledExecutorService.SERVICE_NAME);
+
+        assertNotNull(permission);
+        assertTrue(permission instanceof ScheduledExecutorPermission);
     }
 
     @Test
