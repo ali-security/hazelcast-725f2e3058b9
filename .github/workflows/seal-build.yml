@@ -1,0 +1,292 @@
+# Sealed-libraries build of the hazelcast module (no upstream GitHub Actions CI exists
+# for 3.12.x). Mirrors the project's own Maven build: JDK 8, `mvn install` with the root
+# pom's default surefire configuration (QuickTest group, SlowTest/NightlyTest excluded).
+# The QuickTest suite of the hazelcast module is split into package shards so each leg fits
+# the runner time budget; together the shards run the whole suite.
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Surefire -Dtest selector; empty runs the full QuickTest suite"
+        required: false
+        default: ""
+
+env:
+  MAVEN_VERSION: 3.9.5
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+      - name: Install Maven
+        run: |
+          curl -fsSL --retry 5 "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: m2-
+      - name: Build jars
+        run: |
+          mvn -v
+          mvn -B -ntp install -pl hazelcast -am -DskipTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hazelcast-jars
+          path: |
+            hazelcast/target/hazelcast-3.12.6.jar
+            hazelcast/target/hazelcast-3.12.6-tests.jar
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 48
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.test-filter == '' && '["1","2","3","4","5","6","7","8"]' || '["filter"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+      - name: Install Maven
+        run: |
+          curl -fsSL --retry 5 "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: m2-
+      - name: Select shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Partition the hazelcast module's test tree into units: every top-level directory of
+          # src/test/java (and of com/hazelcast), with the two largest packages split further
+          # (map -> map/impl + the rest of map, cp -> cp/internal/datastructures + the rest of cp).
+          # Shards 1-7 each run ONLY their units; shard 8 runs every unit not named below.
+          # Each unit therefore runs in exactly one shard.
+          T=hazelcast/src/test/java
+          declare -A PAT
+          for d in $(cd "$T" && ls -d */ | tr -d /); do
+            [ "$d" = com ] || PAT[top-$d]="$d/**/*.java"
+          done
+          PAT[com-root]="com/*.java com/hazelcast/*.java"
+          for d in $(cd "$T/com" && ls -d */ | tr -d /); do
+            [ "$d" = hazelcast ] || PAT[comx-$d]="com/$d/**/*.java"
+          done
+          for d in $(cd "$T/com/hazelcast" && ls -d */ | tr -d /); do
+            case "$d" in map|cp) ;; *) PAT[$d]="com/hazelcast/$d/**/*.java" ;; esac
+          done
+          PAT[map-impl]="com/hazelcast/map/impl/**/*.java"
+          PAT[map-rest]="com/hazelcast/map/*.java"
+          for d in $(cd "$T/com/hazelcast/map" && ls -d */ | tr -d /); do
+            [ "$d" = impl ] || PAT[map-rest]="${PAT[map-rest]} com/hazelcast/map/$d/**/*.java"
+          done
+          PAT[cp-ds]="com/hazelcast/cp/internal/datastructures/**/*.java"
+          PAT[cp-rest]="com/hazelcast/cp/*.java com/hazelcast/cp/internal/*.java"
+          for d in $(cd "$T/com/hazelcast/cp" && ls -d */ | tr -d /); do
+            [ "$d" = internal ] || PAT[cp-rest]="${PAT[cp-rest]} com/hazelcast/cp/$d/**/*.java"
+          done
+          for d in $(cd "$T/com/hazelcast/cp/internal" && ls -d */ | tr -d /); do
+            [ "$d" = datastructures ] || PAT[cp-rest]="${PAT[cp-rest]} com/hazelcast/cp/internal/$d/**/*.java"
+          done
+          declare -A SHARDS=(
+            [1]="internal"
+            [2]="map-impl"
+            [3]="map-rest"
+            [4]="spi config"
+            [5]="query cache"
+            [6]="cp-ds"
+            [7]="cp-rest quorum util client nio"
+          )
+          NAMED=" ${SHARDS[*]} "
+          SHARD="${{ matrix.shard }}"
+          EXCLUDES="$RUNNER_TEMP/shard-excludes.txt"
+          : > "$EXCLUDES"
+          set -f  # patterns are surefire globs, never shell globs
+          if [ "$SHARD" != "filter" ]; then
+            for u in "${!PAT[@]}"; do
+              if [ "$SHARD" = 8 ]; then
+                # remainder shard: drop every unit a named shard runs
+                case "$NAMED" in *" $u "*) skip=1 ;; *) skip=0 ;; esac
+              else
+                # named shard: drop every unit it does not own
+                case " ${SHARDS[$SHARD]} " in *" $u "*) skip=0 ;; *) skip=1 ;; esac
+              fi
+              if [ "$skip" = 1 ]; then
+                for p in ${PAT[$u]}; do echo "$p" >> "$EXCLUDES"; done
+              fi
+            done
+          fi
+          echo "Shard ${{ matrix.shard }} excludes (appended to the pom's own excludes):"
+          cat "$EXCLUDES"
+          echo "SHARD_EXCLUDES=$EXCLUDES" >> "$GITHUB_ENV"
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            mvn -B -ntp install -pl hazelcast -am -DfailIfNoTests=false \
+              -Dtest='${{ inputs.test-filter }}' \
+              -DextraVmArgs=-Dhazelcast.logging.type=none
+          else
+            mvn -B -ntp install -pl hazelcast -am \
+              -Dsurefire.excludesFile="$SHARD_EXCLUDES" \
+              -DextraVmArgs=-Dhazelcast.logging.type=none
+          fi
+      - name: Test summary
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import glob, re, xml.etree.ElementTree as ET
+          from collections import OrderedDict
+
+          tot = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+          groups = OrderedDict()  # (class, reason) -> OrderedDict(method -> runs)
+          _src = {}
+
+
+          def find_source(simple_or_fqcn):
+              if simple_or_fqcn not in _src:
+                  if "." in simple_or_fqcn:
+                      hits = glob.glob("*/src/test/java/" + simple_or_fqcn.replace(".", "/") + ".java")
+                  else:
+                      hits = glob.glob("*/src/test/java/**/" + simple_or_fqcn + ".java", recursive=True)
+                  _src[simple_or_fqcn] = (open(hits[0], encoding="utf-8", errors="replace").read().splitlines()
+                                          if hits else None)
+              return _src[simple_or_fqcn]
+
+
+          def preceding_annotations(lines, i):
+              out, j = [], i - 1
+              while j >= 0 and len(out) < 15:
+                  s = lines[j].strip()
+                  if s.startswith(("@", "//", "*", "/*")) or (s.endswith(")") and out and out[-1].startswith("@")):
+                      out.append(s)
+                      j -= 1
+                  else:
+                      break
+              return list(reversed(out))
+
+
+          def describe_ignore(ann):
+              ign = []
+              for idx, a in enumerate(ann):
+                  if a.startswith("@Ignore"):
+                      text = a
+                      for cont in ann[idx + 1:]:
+                          if cont.startswith("+"):
+                              text += " " + cont
+                          else:
+                              break
+                      ign.append(text)
+              if not ign:
+                  return None
+              comments = [a for a in ann if a.startswith(("//", "*", "/*"))]
+              text = " ".join(ign) + ((" -- " + " ".join(comments)) if comments else "")
+              if "sealed-libraries" in text:
+                  return "excluded by the sealed-libraries version patch: " + text
+              return "disabled by the project itself (upstream " + text + " in the 3.12.6 test source)"
+
+
+          def assumes_in(lines, start, end):
+              return [l.strip() for l in lines[start:end] if re.search(r"\bassume\w*\s*\(", l, re.I)]
+
+
+          def body_end(lines, i):
+              depth, opened = 0, False
+              for k in range(i, len(lines)):
+                  depth += lines[k].count("{") - lines[k].count("}")
+                  opened = opened or "{" in lines[k]
+                  if opened and depth <= 0:
+                      return k + 1
+              return len(lines)
+
+
+          def reason_from_source(cls, method, depth=0):
+              simple = cls.split(".")[-1].split("$")[0]
+              lines = find_source(cls.split("$")[0]) if depth == 0 else find_source(cls)
+              if lines is None:
+                  return None
+              m = re.compile(r"\bvoid\s+" + re.escape(method) + r"\s*\(")
+              for i, l in enumerate(lines):
+                  if m.search(l):
+                      r = describe_ignore(preceding_annotations(lines, i))
+                      if r:
+                          return "test method " + r
+                      a = assumes_in(lines, i, body_end(lines, i))
+                      if a:
+                          return "assumption in test body not met: " + " ; ".join(a)
+                      break
+              for i, l in enumerate(lines):
+                  if re.search(r"\bclass\s+" + re.escape(simple) + r"\b", l):
+                      r = describe_ignore(preceding_annotations(lines, i))
+                      if r:
+                          return "whole test class " + r
+                      break
+              a = assumes_in(lines, 0, len(lines))
+              if a:
+                  return "assumption in setup/fixture not met: " + " ; ".join(sorted(set(a)))
+              if depth < 4:
+                  for l in lines:
+                      ext = re.search(r"\bclass\s+\w+(?:<[^{]*?>)?\s+extends\s+(\w+)", l)
+                      if ext:
+                          return reason_from_source(ext.group(1), method, depth + 1)
+              return None
+
+
+          for f in sorted(glob.glob("**/target/surefire-reports/TEST-*.xml", recursive=True) +
+                          glob.glob("**/target/failsafe-reports/TEST-*.xml", recursive=True)):
+              r = ET.parse(f).getroot()
+              for k in tot:
+                  tot[k] += int(r.get(k, 0) or 0)
+              for tc in r.iter("testcase"):
+                  sk = tc.find("skipped")
+                  if sk is None:
+                      continue
+                  cls = tc.get("classname") or "?"
+                  method = re.sub(r"\[.*$", "", tc.get("name") or "?")
+                  msg = (sk.get("message") or (sk.text or "")).strip().replace("\n", " ")[:300]
+                  src = None
+                  if not msg or msg.startswith("got:"):
+                      try:
+                          src = reason_from_source(cls, method)
+                      except Exception as e:  # never let the report itself fail the leg
+                          src = "source lookup failed: %s" % e
+                  if not msg:
+                      reason = src or "no message and no @Ignore/assume found in source (JUnit assumption)"
+                  elif src:
+                      reason = msg + " [" + src + "]"
+                  else:
+                      reason = msg
+                  g = groups.setdefault((cls, reason[:400]), OrderedDict())
+                  g[method] = g.get(method, 0) + 1
+
+          passed = tot["tests"] - tot["failures"] - tot["errors"] - tot["skipped"]
+          print("SHARD SUMMARY: tests run=%d passed=%d failures=%d errors=%d skipped=%d"
+                % (tot["tests"], passed, tot["failures"], tot["errors"], tot["skipped"]))
+          print("Skipped tests, grouped by class and reason (parameterized variants collapsed, xN = N runs):")
+          for (cls, reason), methods in groups.items():
+              n = sum(methods.values())
+              names = ", ".join(mm + (" x%d" % c if c > 1 else "") for mm, c in methods.items())
+              print("SKIP %s (%d): %s" % (cls, n, reason))
+              print("     methods: %s" % names)
+          EOF
